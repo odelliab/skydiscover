@@ -5,20 +5,22 @@ max_iterations: 100
 checkpoint_interval: 1
 log_level: "INFO"
 
+# LLM intentionally unset: the meta-search inherits the parent discovery
+# process's endpoint/models by default. To run the meta-search on a different
+# provider, add an explicit `models`/`api_base` here (their presence disables
+# provider inheritance), or set `search.share_llm: true` to force inheritance.
+# To keep a CHEAPER GUIDE model on the inherited endpoint, declare only
+# `guide_models` below — provider inheritance still applies, and the guide
+# inherits the parent's api_base/api_key when it doesn't set its own.
 llm:
-  models:
-    - name: "gpt-5"
-      weight: 1.0
-  api_base: "https://api.openai.com/v1"
-  api_key: ${OPENAI_API_KEY}
   temperature: 0.7
-  # top_p: 0.95  # omitted by default; some providers (e.g. Anthropic) reject both temperature and top_p
   max_tokens: 32000
   timeout: 600
-  guide_models:
-    - name: "gpt-5-mini"
-      max_tokens: 8000
-      timeout: 300
+  # Example guide-only override (uncomment to keep a cheaper meta-search guide):
+  # guide_models:
+  #   - name: "claude-haiku-4-5"
+  #     max_tokens: 8000
+  #     timeout: 300
 
 search:
   type: "evox_meta"

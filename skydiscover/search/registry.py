@@ -6,6 +6,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Type
 
+import yaml
+
 from skydiscover.config import Config, DatabaseConfig, build_output_dir, load_config
 from skydiscover.search.base_database import Program, ProgramDatabase
 from skydiscover.search.default_discovery_controller import (
@@ -113,6 +115,31 @@ def get_program(
     )
 
 
+def _meta_config_llm_declarations(config_path: str) -> Tuple[bool, bool]:
+    """Inspect the raw meta-search YAML for explicit LLM declarations.
+
+    Returns (declares_provider, declares_guide):
+      - declares_provider: the llm block pins its own models or api_base, i.e.
+        a deliberate "run the meta-search on a different provider" choice that
+        disables provider inheritance.
+      - declares_guide: the llm block pins its own guide_models, i.e. a
+        "keep a cheaper guide model on the inherited endpoint" choice. Honored
+        independently; it does NOT by itself disable provider inheritance.
+
+    We inspect the raw YAML (not the loaded dataclass, whose defaults would
+    mask the distinction).
+    """
+    try:
+        with open(config_path, "r") as f:
+            raw = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return (False, False)
+    llm = raw.get("llm") or {}
+    declares_provider = bool(llm.get("models") or llm.get("api_base"))
+    declares_guide = bool(llm.get("guide_models"))
+    return (declares_provider, declares_guide)
+
+
 def setup_search(
     initial_program_path: str,
     evaluation_file: str,
@@ -120,6 +147,7 @@ def setup_search(
     output_dir: Optional[str] = None,
     evaluator_env_vars: Optional[Dict[str, str]] = None,
     parent_llm_config: Optional["LLMConfig"] = None,
+    force_share_llm: bool = False,
 ) -> Tuple[DiscoveryControllerInput, str]:
     """
     Load config, create database, and build a DiscoveryControllerInput from a config path.
@@ -132,26 +160,69 @@ def setup_search(
         parent_llm_config: If provided, inherit LLM settings (api_base, api_key,
             models) from the parent config so the search-side evolution uses the
             same endpoint as the main discovery process.
+        force_share_llm: If True, always inherit the provider from
+            parent_llm_config even when the meta-search config declares its own.
+            If False (default), inherit only when the meta-search config does NOT
+            declare its own llm.models/llm.api_base (inherit-on-absence).
+            An explicit llm.guide_models is always preserved (guide-only
+            override) so the meta-search can keep a cheaper guide model on the
+            inherited endpoint.
 
     Returns:
         Tuple of (controller_input, initial_program_solution)
     """
     config = load_config(config_path)
 
-    # Inherit LLM settings from parent config when provided.
-    # Use the parent's actual model configs (which have the correct per-model
-    # api_base/api_key, e.g. Azure endpoints) rather than the top-level
-    # LLMConfig defaults which may still point to api.openai.com.
-    if parent_llm_config is not None and parent_llm_config.models:
+    # Decide whether the meta-search should inherit the parent's LLM endpoint.
+    # Default: inherit unless the meta-config explicitly pins its own provider
+    # (inherit-on-absence). force_share_llm (search.share_llm: true) always
+    # inherits. This stops the meta-search from silently falling back to the
+    # bundled openai.com default when the parent is configured elsewhere.
+    meta_declares_provider, meta_declares_guide = _meta_config_llm_declarations(
+        config_path
+    )
+    should_inherit = (
+        parent_llm_config is not None
+        and parent_llm_config.models
+        and (force_share_llm or not meta_declares_provider)
+    )
+    if should_inherit:
         import copy
 
         parent_models = [copy.deepcopy(m) for m in parent_llm_config.models]
         config.llm.models = parent_models
         config.llm.evaluator_models = [copy.deepcopy(m) for m in parent_llm_config.models]
-        config.llm.guide_models = [copy.deepcopy(m) for m in parent_llm_config.models]
+        # Guide-only override: preserve an explicitly-declared guide model
+        # (a cheaper model on the same/inherited endpoint). Only fall back to
+        # the parent's main model for the guide when the meta-config is silent.
+        if not meta_declares_guide:
+            config.llm.guide_models = [
+                copy.deepcopy(m) for m in parent_llm_config.models
+            ]
         # Sync top-level api_base/api_key from the first parent model
         config.llm.api_base = parent_models[0].api_base or config.llm.api_base
         config.llm.api_key = parent_models[0].api_key or config.llm.api_key
+        # If the preserved guide model has no endpoint of its own, point it at
+        # the inherited one so a guide-only override doesn't fall back to the
+        # bundled openai.com default.
+        if meta_declares_guide:
+            for gm in config.llm.guide_models or []:
+                gm.api_base = gm.api_base or config.llm.api_base
+                gm.api_key = gm.api_key or config.llm.api_key
+    elif (
+        parent_llm_config is not None
+        and parent_llm_config.api_base
+        and config.llm.api_base
+        and parent_llm_config.api_base != config.llm.api_base
+    ):
+        logger.warning(
+            "EvoX meta-search uses a different LLM endpoint (%s) than the main "
+            "discovery process (%s). Set search.share_llm: true (or drop the llm "
+            "block from %s) to share the parent endpoint.",
+            config.llm.api_base,
+            parent_llm_config.api_base,
+            config_path,
+        )
 
     with open(initial_program_path, "r") as f:
         initial_program_solution = f.read()

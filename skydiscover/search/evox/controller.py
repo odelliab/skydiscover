@@ -62,7 +62,8 @@ class CoEvolutionController(DiscoveryController):
             config_path=db_cfg.config_path,
             output_dir=self.config.search.output_dir,
             evaluator_env_vars=self.evaluator_env_vars,
-            parent_llm_config=self.config.llm if self.config.search.share_llm else None,
+            parent_llm_config=self.config.llm,
+            force_share_llm=self.config.search.share_llm,
         )
         self.search_controller = DiscoveryController(controller_input)
         self.search_scorer = LogWindowScorer()
@@ -79,6 +80,7 @@ class CoEvolutionController(DiscoveryController):
 
         self._switch_interval = getattr(self.config.search, "switch_interval", None)
         self._stagnant_count = 0
+        self._meta_evolution_failures = 0
         self._last_tracked_best_score: Optional[float] = None
 
         self._diverge_label = ""
@@ -155,7 +157,21 @@ class CoEvolutionController(DiscoveryController):
                     logger.info(
                         f"Stagnation detected -> evolving search strategy (solution_iter={completed_solution_iter})"
                     )
-                    await self._evolve_search(completed_solution_iter)
+                    try:
+                        await self._evolve_search(completed_solution_iter)
+                    except Exception as e:
+                        # Meta-evolution is an optimization, not a correctness
+                        # requirement. If the meta-search LLM is unreachable,
+                        # keep the current search strategy and continue the run
+                        # rather than killing hours of solution evolution.
+                        logger.warning(
+                            "Search-strategy evolution failed (%s); continuing "
+                            "with the current strategy. Solution evolution is "
+                            "unaffected.",
+                            e,
+                            exc_info=True,
+                        )
+                        self._meta_evolution_failures += 1
 
             except Exception as e:
                 logger.error(f"Error in iteration {iteration}: {e}", exc_info=True)
