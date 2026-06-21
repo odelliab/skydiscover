@@ -63,7 +63,7 @@ class CoEvolutionController(DiscoveryController):
             output_dir=self.config.search.output_dir,
             evaluator_env_vars=self.evaluator_env_vars,
             parent_llm_config=self.config.llm,
-            force_share_llm=self.config.search.share_llm,
+            share_llm=self.config.search.share_llm,
         )
         self.search_controller = DiscoveryController(controller_input)
         self.search_scorer = LogWindowScorer()
@@ -163,7 +163,9 @@ class CoEvolutionController(DiscoveryController):
                         # Meta-evolution is an optimization, not a correctness
                         # requirement. If the meta-search LLM is unreachable,
                         # keep the current search strategy and continue the run
-                        # rather than killing hours of solution evolution.
+                        # rather than killing hours of solution evolution. Set
+                        # search.share_llm: true if the meta-search should use the
+                        # main process's (reachable) endpoint.
                         logger.warning(
                             "Search-strategy evolution failed (%s); continuing "
                             "with the current strategy. Solution evolution is "
